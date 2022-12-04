@@ -1,0 +1,142 @@
+#TCC Engenharia Elétrica FEI
+#Parceria FEI-METRÔ
+#Projeto: Automação de Persianas em Estações do Metrô
+#Criadores: 
+#Gustavo Calheiros Condursi Paranhos
+#Joyce Ferreira Silva
+#Lucas Brito Santos
+#Nicholas Banove Munhoz
+
+#-------------------------------------
+import machine
+from bh1750 import BH1750
+import time
+from umqttsimple import MQTTClient
+import ubinascii
+import micropython
+import network
+import esp
+from machine import Pin
+import dht
+esp.osdebug(None)
+import gc
+gc.collect()
+
+#Conexão ao Broker
+ssid = 'raspi-webgui'
+password = 'ChangeMe'
+mqtt_server = '10.3.141.1'
+
+client_id = ubinascii.hexlify(machine.unique_id())
+
+#Tópicos Publish e Subscribe
+topic_pub_temp = b'esp/dht/temp_norte'
+topic_pub_umid = b'esp/dht/umidade_norte'
+topic_pub_lux = b'esp/bh1750/lux_norte'
+topic_sub_saida = b'esp/broker/saida_norte'
+
+last_message = 0
+message_interval = 5
+
+#Teste de Conexão ao Broker
+station = network.WLAN(network.STA_IF)
+
+station.active(True)
+station.connect(ssid, password)
+
+while station.isconnected() == False:
+  pass
+
+print('Connection successful')
+
+#Declaração da Pinagem
+saida = machine.Pin(2) #Pino 2 para a Saída
+p12 = machine.Pin(12)
+p13 = machine.Pin(13)
+servo = machine.PWM(p12, freq=50)
+servo2 = machine.PWM(p13, freq=50)
+sensor = dht.DHT11(Pin(14)) #Pino 14 para Temperatura e Umidade
+scl = machine.Pin(5) #Pino 5 para Luminosidade
+sda = machine.Pin(4) #Pino 4 para Luminosidade
+i2c = machine.SoftI2C(scl=scl, sda=sda)
+s = BH1750(i2c)
+#p12 = machine.Pin(12)
+
+#---------------------------------------
+
+def connect_mqtt():
+  global client_id, mqtt_server
+  client = MQTTClient(client_id, mqtt_server)
+  client.connect()
+  print('Connected to %s MQTT broker' % (mqtt_server))
+  return client
+
+def restart_and_reconnect():
+  print('Failed to connect to MQTT broker. Reconnecting...')
+  time.sleep(10)
+  machine.reset()
+
+def read_sensor():
+  try:
+    sensor.measure()
+    temp = sensor.temperature()
+    umid = sensor.humidity()
+    if (isinstance(temp, float) and isinstance(umid, float)) or (isinstance(temp, int) and isinstance(umid, int)):
+      temp = (b'{0:3.1f},'.format(temp))
+      umid =  (b'{0:3.1f},'.format(umid))
+      return temp, umid
+    else:
+      return('Invalid sensor readings.')
+  except OSError as e:
+    return('Failed to read sensor.')
+    
+def read_lux():
+  try:
+    lux = s.luminance(BH1750.ONCE_HIRES_1)
+    if (isinstance(lux, float)) or (isinstance(lux, int)):
+      lux =  (b'{0:3.1f},'.format(lux))
+      return lux
+    else:
+      return('Invalid sensor readings.')
+  except OSError as e:
+    return('Failed to read sensor.')
+    
+try:
+  client = connect_mqtt()
+except OSError as e:
+  restart_and_reconnect()
+
+while True:
+  try:
+    if (time.time() - last_message) > message_interval:
+      temp, umid = read_sensor()
+      lux = read_lux()
+      print(temp)
+      print(umid)
+      print(lux)
+      client.publish(topic_pub_temp, temp)
+      client.publish(topic_pub_umid, umid)
+      client.publish(topic_pub_lux, lux)
+      last_message = time.time()
+  except OSError as e:
+    restart_and_reconnect()
+
+  def cb(topic, msg):
+      print('Received Data:  Topic = {}, Msg = {}'.format(topic, msg))
+      if topic == b'esp/broker/saida_norte':
+          if msg == b'1':
+            print('Fechar Persianas')
+              #saida.value(1)
+            servo.duty(105)
+            servo2.duty(105)
+              
+          else:
+            print('Abrir Persianas')
+            servo.duty(57)
+            servo2.duty(57)
+            
+  # Funcao Callback
+  client.set_callback(cb)
+  
+  # Inscricao nos topicos
+  client.subscribe(b'esp/broker/saida_norte')
